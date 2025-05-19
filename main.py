@@ -5,7 +5,7 @@ from datetime import datetime
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                            QHBoxLayout, QPushButton, QLabel, QTableWidget, 
                            QTableWidgetItem, QHeaderView, QDialog, QFileDialog,
-                           QInputDialog, QMessageBox, QScrollArea)
+                           QInputDialog, QMessageBox, QScrollArea, QDialogButtonBox)
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QPixmap, QImage
 
@@ -83,6 +83,102 @@ class FacePreviewWidget(QWidget):
             self.parent_app.face_detection_timer.start(500)  # Restore face detection rate
 
 
+class PhotoFaceDialog(QDialog):
+    """Dialog to display and name faces detected in a photo"""
+    def __init__(self, image, face_data, parent=None):
+        super().__init__(parent)
+        self.parent_app = parent
+        self.image = image
+        self.face_data = face_data
+        self.named_faces = []  # Will store tuples of (face_image, name)
+        
+        self.setWindowTitle("Name Detected Faces")
+        self.setMinimumSize(600, 400)
+        
+        # Main layout
+        main_layout = QVBoxLayout()
+        self.setLayout(main_layout)
+        
+        # Instructions
+        instructions = QLabel("Name the faces you want to save. Unnamed faces will be ignored.")
+        instructions.setStyleSheet("font-weight: bold;")
+        main_layout.addWidget(instructions)
+        
+        # Original image preview (scaled down)
+        h, w, c = image.shape
+        q_img = QImage(image.data, w, h, w*c, QImage.Format.Format_RGB888).rgbSwapped()
+        pixmap = QPixmap.fromImage(q_img)
+        
+        image_label = QLabel()
+        image_label.setPixmap(pixmap.scaled(400, 300, Qt.AspectRatioMode.KeepAspectRatio))
+        image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        main_layout.addWidget(image_label)
+        
+        # Scroll area for faces
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_widget = QWidget()
+        face_layout = QHBoxLayout(scroll_widget)
+        face_layout.setSpacing(10)
+        scroll_area.setWidget(scroll_widget)
+        main_layout.addWidget(scroll_area)
+        
+        # Add detected faces
+        self.face_widgets = []
+        for i, face in enumerate(face_data):
+            face_widget = self.create_face_widget(face['image'], i)
+            face_layout.addWidget(face_widget)
+            self.face_widgets.append(face_widget)
+        
+        # Add some stretch at the end
+        face_layout.addStretch()
+        
+        # Buttons
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | 
+                                      QDialogButtonBox.StandardButton.Cancel)
+        button_box.accepted.connect(self.save_faces)
+        button_box.rejected.connect(self.reject)
+        main_layout.addWidget(button_box)
+    
+    def create_face_widget(self, face_img, index):
+        """Create a widget for displaying and naming a face"""
+        widget = QWidget()
+        layout = QVBoxLayout()
+        widget.setLayout(layout)
+        
+        # Face image
+        h, w, c = face_img.shape
+        q_img = QImage(face_img.data, w, h, w*c, QImage.Format.Format_RGB888).rgbSwapped()
+        pixmap = QPixmap.fromImage(q_img)
+        
+        face_label = QLabel()
+        face_label.setPixmap(pixmap.scaled(100, 100, Qt.AspectRatioMode.KeepAspectRatio))
+        face_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(face_label)
+        
+        # Name input
+        name_input = QInputDialog()
+        name_input.setLabelText("Name:")
+        name_input.setWindowFlags(Qt.WindowType.Widget)
+        name_input.setInputMode(QInputDialog.InputMode.TextInput)
+        layout.addWidget(name_input)
+        
+        # Store reference to the input and face image
+        widget.face_img = face_img
+        widget.name_input = name_input
+        
+        return widget
+    
+    def save_faces(self):
+        """Save named faces and close dialog"""
+        for widget in self.face_widgets:
+            name = widget.name_input.textValue().strip()
+            if name:  # Only save faces with names
+                self.named_faces.append((widget.face_img, name))
+        
+        self.accept()  # Close dialog with Accept result
+
+
 class FaceImageDialog(QDialog):
     """Dialog to display a face image"""
     def __init__(self, face_img, name, has_access, parent=None):
@@ -144,7 +240,6 @@ class FaceImageDialog(QDialog):
         sender = self.sender()
         if sender:
             sender.setText("Revoke Access" if self.has_access else "Grant Access")
-
 
 class FaceRecognitionApp(QMainWindow):
     def __init__(self):
@@ -217,6 +312,11 @@ class FaceRecognitionApp(QMainWindow):
         self.add_face_btn.clicked.connect(self.add_face)
         self.add_face_btn.setEnabled(False)
         left_layout.addWidget(self.add_face_btn)
+        
+        # NEW: Add load photo button
+        self.load_photo_btn = QPushButton("Load Photo")
+        self.load_photo_btn.clicked.connect(self.load_photo)
+        left_layout.addWidget(self.load_photo_btn)
         
         # Access status section
         access_label = QLabel("Access Status:")
@@ -294,6 +394,65 @@ class FaceRecognitionApp(QMainWindow):
     def set_status_message(self, message):
         """Set the status message in the UI"""
         self.status_label.setText(message)
+        
+    
+    # NEW: Load photo method
+    def load_photo(self):
+        """Load a photo from disk and detect faces"""
+        # Show file dialog to select photo
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Open Photo", "", "Image Files (*.png *.jpg *.jpeg *.bmp);;All Files (*)"
+        )
+        
+        if not file_path:
+            return
+        
+        # Load the image
+        image = cv2.imread(file_path)
+        if image is None:
+            self.set_status_message(f"Error: Could not load image from {file_path}")
+            return
+        
+        # Show a temporary message
+        self.set_status_message("Detecting faces in photo...")
+        
+        # Detect faces in the image
+        face_data, image_with_boxes = self.face_system.detect_faces(image)
+        
+        if not face_data:
+            self.set_status_message("No faces detected in the photo")
+            return
+        
+        # Display the image with boxes in the main view
+        h, w, c = image_with_boxes.shape
+        bytes_per_line = w * c
+        q_img = QImage(image_with_boxes.data, w, h, bytes_per_line, QImage.Format.Format_RGB888).rgbSwapped()
+        self.camera_feed_label.setPixmap(QPixmap.fromImage(q_img).scaled(
+            self.camera_feed_label.width(), 
+            self.camera_feed_label.height(),
+            Qt.AspectRatioMode.KeepAspectRatio
+        ))
+        
+        # Create a dialog to allow naming the detected faces
+        dialog = PhotoFaceDialog(image, face_data, self)
+        result = dialog.exec()
+        
+        if result == QDialog.DialogCode.Accepted and dialog.named_faces:
+            # Process the named faces
+            faces_added = 0
+            for face_img, name in dialog.named_faces:
+                if self.face_system.add_face(face_img, name):
+                    # Store the face image and set default access rights
+                    self.saved_face_images[name] = face_img
+                    self.face_access_rights[name] = False
+                    faces_added += 1
+            
+            # Update the table
+            self.update_face_table()
+            self.set_status_message(f"Added {faces_added} face(s) from photo")
+        else:
+            self.set_status_message("No faces saved from photo")
+        
         
     def toggle_camera(self):
         """Toggle camera on/off"""
