@@ -94,7 +94,7 @@ class FaceRecognitionSystem:
         
         if len(self.known_face_encodings) > 0:
             # Compare the face with known faces
-            matches = face_recognition.compare_faces(self.known_face_encodings, face_encoding, 0.5)
+            matches = face_recognition.compare_faces(self.known_face_encodings, face_encoding, 0.55)
             
             # If a match was found, use the first one
             if True in matches:
